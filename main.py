@@ -42,15 +42,12 @@ parser.add_argument('--private', '-p', default=True, action='store_true', help='
 parser.add_argument('--eps', default=20000, type=float, help='privacy parameter epsilon')
 parser.add_argument('--delta', default=1e-5, type=float, help='desired delta')
 
-#parser.add_argument('--clip', default=[2, 0.9, 0.63, 0.45, 1], type=list, help='clipping threshold for gradient embedding')
 parser.add_argument('--clip', default=[1, 1, 1, 1, 1], type=list, help='clipping threshold for gradient embedding')
 parser.add_argument('--ratio', default=[0.3, 0.25, 0.2, 0.1, 0.1], type=list, help='infinite clipping ratio threshold for gradient embedding')
 parser.add_argument('--clip_p', default=[2, 2, 2, 2, 2, 2], type=list, help='clipping p for gradient embedding')
 parser.add_argument('--power_iter', default=1, type=int, help='number of power iterations')
 parser.add_argument('--num_groups', default=4, type=int, help='number of parameters groups')
 parser.add_argument('--num_bases', default=[250, 500, 1000, 1500], type=list, help='dimension of anchor subspace')
-#parser.add_argument('--num_bases', default=[20], type=list, help='dimension of anchor subspace')
-
 
 parser.add_argument('--adaptive_clip', default=True, action='store_true', help='enable adaptive clipping') # for testing only
 parser.add_argument('--coordinate_sample', default=False, action='store_true', help='enable coordinate sampling')
@@ -67,40 +64,7 @@ parser.add_argument('--aux_data_size', default= 2000, type=int, help='size of th
 
 use_cuda = True
 gpu_device = torch.device('cuda:1')
-noise_multiplier = [4, 5, 5.2, 5.4, 1.6] #1000 4 2500
-#noise_multiplier = [2.6, 3.1, 3.0, 3.2, 1.4] #1000 5000 1/2 8
-#noise_multiplier = [11.1, 13.5, 14, 14.8, 4.4]
-#noise_multiplier = [11.3, 13.5, 13.8, 15, 4.8]
-#noise_multiplier = [2.9, 3.15, 3.15, 4, 1.2]
-#noise_multiplier = [3.1, 3.9, 4.3, 4.4, 1.2]
-#noise_multiplier = [7, 8.8, 9, 9.6, 2.6]
-#noise_multiplier = [6.5, 8, 8.2, 8.7, 2.7]  #2000 6250/250 epoch
-#noise_multiplier = [3.9, 4.8, 4.7, 5.3, 1.8]  #2000 2500/100 epoch
-#noise_multiplier = [4, 5.2, 5.2, 5.2, 1.5]  #2000 2000/80 epoch
-#noise_multiplier = [3.6, 4.4, 4.6, 5, 1.3]  #2000 2000/80 epoch
-
-#noise_multiplier = [10, 12.4, 12, 12.9, 3.8]  #B2000 eps=2 1000/40 epoch
-#noise_multiplier= [9.4000, 11.8000, 11.8000,12.8000, 3.8000]  #B2000 eps=2.5 1500/60 epoch
-#noise_multiplier= [5.3, 7.8, 7.9, 9.2, 2.4]  #B2000 eps=4 1500/60 epoch
-
-#noise_multiplier = [9.6, 11.8, 11.9, 3.7]  #B2000 eps=2 1000/40 epoch
-
-#noise_multiplier = [5.3, 6.5, 6.5, 7, 1.9]  #B1000 eps=2 1000/40 epoch
-
-#noise_multiplier = [3, 3.75, 4, 4.25, 1.5]  #B1000 eps=2 500/2000 iteration
-#noise_multiplier = [3, 3.75, 3.75, 4, 1.5]  #B1000 eps=2.5 500/3000 iteration
-
-#noise_multiplier = [3.2500, 4.2500, 4.2500, 4.5000, 1.7500] #0.333 eps=2.5 500/4000 iteration
-#noise_multiplier = [3.500, 4.2500, 4.500, 5.0, 1.7500] #0.5 eps=2.5 500/4000 iteration
-#noise_multiplier = [2.2500,2.7500,2.7500,3.0000,1.2500] #0.5 eps=4 500/4000 iteration
-
-#noise_multiplier = [1.2500,1.7500,1.7500,2.25, 0.75] #0.3333 eps=8 500/5000 iteration
-
-#noise_multiplier = [1.195, 1.195] #0.5 eps=2  500/2000 iteration
-# noise_multiplier = [0.95, 0.95] #0.5 eps=2  500/1000 iteration
-#noise_multiplier = [3.500, 4.500, 4.500, 5, 2] #B1000 eps=2.5 500/5000 iteration
-
-
+noise_multiplier = [4, 5, 5.2, 5.4, 1.6]
 
 args = parser.parse_args()
 print('eps=2')
@@ -165,7 +129,6 @@ print('\n==> Computing noise scale for privacy budget (%.1f, %f)-DP' % (args.eps
 sampling_prob = args.batchsize / n_training
 steps = int(args.n_epoch / sampling_prob)
 sigma, eps = get_sigma(sampling_prob, steps, args.eps, args.delta, rgp=True)
-# noise_multiplier0 = noise_multiplier1 = sigma
 
 print('noise scale', noise_multiplier, 'privacy guarantee: ', eps)
 
@@ -300,20 +263,11 @@ def train(epoch):
             loss = loss_func(outputs, targets)
             loss.backward()
 
-            # norms = None
-            # for p in net.parameters():
-            #    if norms is None:
-            #        norms = [torch.norm(g) ** 2 for g in p.grad_sample]
-            #    else:
-            #        norms += [torch.norm(g) ** 2 for g in p.grad_sample]
-            # print(min(norms), sum(norms) / len(norms), max(norms))
-
             for p in net.parameters():
                 batch_grad_list.append(p.grad_sample.reshape(p.grad_sample.shape[0], -1))
                 del p.grad_sample
 
             norms = torch.norm(flatten_tensor(batch_grad_list), dim = 1)
-            #print("before flat: ", norms)
 
             ## compute gradient embeddings and residual gradients
             if args.multi_aug:
@@ -326,7 +280,6 @@ def train(epoch):
             args.clip = net.gep.clip
             all_norm = sum([val * val for val in args.clip])
             adjust_learning_rate(optimizer, args.lr / all_norm, epoch, all_epoch=args.n_epoch)
-            #print(args.clip)
 
             if acc_clipped_grad is None or acc_residual is None:
                 acc_clipped_grad, acc_residual = clipped_grad, residual_grad
@@ -365,11 +318,6 @@ def train(epoch):
             loss = loss_func(outputs, targets)
             loss.backward()
             optimizer.step()
-
-            # for p in net.parameters():
-            #    p.grad.data = torch.sum(p.grad_sample, dim=0) / args.batchsize
-            #    del p.grad_sample
-            # optimizer.original_step()
 
         step_loss = loss.item()
         # if(args.private):
@@ -421,9 +369,6 @@ def test(epoch):
 print('\n==> Strat training')
 
 for epoch in range(start_epoch, args.n_epoch):
-    # if epoch == 0:
-    #     args.clip = [10000, 10000]
-    #     net.gep.clip = [10000, 10000]
     train_loss, train_acc = train(epoch)
     test_loss, test_acc = test(epoch)
 
