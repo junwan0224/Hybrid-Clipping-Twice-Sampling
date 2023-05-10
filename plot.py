@@ -12,6 +12,9 @@ import random
 import time
 import numpy as np
 import resnet
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.axis as ax
 
 from opacus import PrivacyEngine
 from opacus.utils import module_modification
@@ -28,12 +31,12 @@ parser = argparse.ArgumentParser(description='Differentially Private learning wi
 
 ## general arguments
 parser.add_argument('--dataset', default='cifar10', type=str, help='dataset name')
-parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
+parser.add_argument('--resume', default=True, action='store_true', help='resume from checkpoint')
 parser.add_argument('--sess', default='resnet20_cifar10', type=str, help='session name')
 parser.add_argument('--seed', default=2, type=int, help='random seed')
 parser.add_argument('--weight_decay', default=2e-4, type=float, help='weight decay')
 parser.add_argument('--batchsize', default= 1000, type=int, help='batch size')
-parser.add_argument('--n_epoch', default= 50, type=int, help='total number of epochs')
+parser.add_argument('--n_epoch', default= 100, type=int, help='total number of epochs')
 parser.add_argument('--lr', default= 2.5, type=float, help='base learning rate (default=0.1)')
 parser.add_argument('--momentum', default= 0.9, type=float, help='value of momentum')
 
@@ -44,12 +47,12 @@ parser.add_argument('--delta', default=1e-5, type=float, help='desired delta')
 
 #parser.add_argument('--clip', default=[2, 0.9, 0.63, 0.45, 1], type=list, help='clipping threshold for gradient embedding')
 parser.add_argument('--clip', default=[1, 1, 1, 1, 1], type=list, help='clipping threshold for gradient embedding')
-parser.add_argument('--ratio', default=[0.3, 0.25, 0.2, 0.1, 0.1], type=list, help='infinite clipping ratio threshold for gradient embedding')
+parser.add_argument('--ratio', default=[0.25, 0.1, 0.1, 0.1, 0.1], type=list, help='infinite clipping ratio threshold for gradient embedding')
 parser.add_argument('--clip_p', default=[2, 2, 2, 2, 2, 2], type=list, help='clipping p for gradient embedding')
 parser.add_argument('--power_iter', default=1, type=int, help='number of power iterations')
-parser.add_argument('--num_groups', default=4, type=int, help='number of parameters groups')
-parser.add_argument('--num_bases', default=[250, 500, 1000, 1500], type=list, help='dimension of anchor subspace')
-#parser.add_argument('--num_bases', default=[20], type=list, help='dimension of anchor subspace')
+parser.add_argument('--num_groups', default=10, type=int, help='number of parameters groups')
+#parser.add_argument('--num_bases', default=[250, 500, 1000, 1500], type=list, help='dimension of anchor subspace')
+parser.add_argument('--num_bases', default=[10], type=list, help='dimension of anchor subspace')
 
 
 parser.add_argument('--adaptive_clip', default=True, action='store_true', help='enable adaptive clipping') # for testing only
@@ -67,11 +70,8 @@ parser.add_argument('--aux_data_size', default= 2000, type=int, help='size of th
 
 use_cuda = True
 gpu_device = torch.device('cuda:1')
-noise_multiplier = [4, 5, 5.2, 5.4, 1.6] #1000 4 2500
-#noise_multiplier = [2.6, 3.1, 3.0, 3.2, 1.4] #1000 5000 1/2 8
-#noise_multiplier = [11.1, 13.5, 14, 14.8, 4.4]
-#noise_multiplier = [11.3, 13.5, 13.8, 15, 4.8]
-#noise_multiplier = [2.9, 3.15, 3.15, 4, 1.2]
+
+#noise_multiplier = [6, 7.3, 7.5, 7.7, 2.3]
 #noise_multiplier = [3.1, 3.9, 4.3, 4.4, 1.2]
 #noise_multiplier = [7, 8.8, 9, 9.6, 2.6]
 #noise_multiplier = [6.5, 8, 8.2, 8.7, 2.7]  #2000 6250/250 epoch
@@ -97,7 +97,7 @@ noise_multiplier = [4, 5, 5.2, 5.4, 1.6] #1000 4 2500
 #noise_multiplier = [1.2500,1.7500,1.7500,2.25, 0.75] #0.3333 eps=8 500/5000 iteration
 
 #noise_multiplier = [1.195, 1.195] #0.5 eps=2  500/2000 iteration
-# noise_multiplier = [0.95, 0.95] #0.5 eps=2  500/1000 iteration
+noise_multiplier = [1.05, 1.05] #0.5 eps=2  500/1000 iteration
 #noise_multiplier = [3.500, 4.500, 4.500, 5, 2] #B1000 eps=2.5 500/5000 iteration
 
 
@@ -184,7 +184,7 @@ if (args.resume):
         assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
         checkpoint_file = './checkpoint/' + args.sess + '.ckpt'
         checkpoint = torch.load(checkpoint_file)
-        net = resnet20()
+        net = resnet22(num_class=10)
         net.cuda(gpu_device)
         restore_param(net.state_dict(), checkpoint['net'])
         best_acc = checkpoint['acc']
@@ -321,119 +321,159 @@ def train(epoch):
                 norms = torch.norm(flat_grad, dim = 1)
             else:
                 flat_grad = flatten_tensor(batch_grad_list)
+            return flat_grad
+ 
+@torch.jit.script
+def orthogonalize(matrix):
+    n, m = matrix.shape
+    for i in range(m):
+        # Normalize the i'th column
+        col = matrix[:, i: i + 1]
+        col /= torch.sqrt(torch.sum(col ** 2))
+        # Project it on the rest and remove it
+        if i + 1 < m:
+            rest = matrix[:, i + 1:]
+            # rest -= torch.matmul(col.t(), rest) * col
+            rest -= torch.sum(col * rest, dim=0) * col
 
-            clipped_grad, residual_grad, target_grad, num_bases_space = net.gep(flat_grad, logging=logging)
-            args.clip = net.gep.clip
-            all_norm = sum([val * val for val in args.clip])
-            adjust_learning_rate(optimizer, args.lr / all_norm, epoch, all_epoch=args.n_epoch)
-            #print(args.clip)
-
-            if acc_clipped_grad is None or acc_residual is None:
-                acc_clipped_grad, acc_residual = clipped_grad, residual_grad
-            else:
-                acc_clipped_grad += clipped_grad
-                acc_residual += residual_grad
-
-            if not args.multi_aug or (batch_idx + 1) % merge_steps == 0:
-                ## add noise to guarantee differential privacy
-                offset = 0
-                for i, num_bases in enumerate(num_bases_space):
-                    theta = acc_clipped_grad[offset:offset + num_bases]
-                    theta_noise = torch.normal(0, noise_multiplier[i] * args.clip[i] / args.batchsize, size=theta.shape,
-                                           device=theta.device)
-                    acc_clipped_grad[offset:offset + num_bases] = theta + theta_noise
-                    offset += num_bases
-                acc_residual  += torch.normal(0, noise_multiplier[-1] * args.clip[-1] / args.batchsize, size=acc_residual .shape,
-                                           device=acc_residual .device)
-                ## update with Biased-GEP or GEP
-                noisy_grad = gep.get_approx_grad(acc_clipped_grad, transformed=True) + acc_residual
-                if (logging):
-                    print('target grad norm: %.2f, noisy approximation norm: %.2f' % (
-                    target_grad.norm().item(), noisy_grad.norm().item()))
-
-                #print(noisy_grad)
-                offset = 0
-                for p in net.parameters():
-                    shape = p.grad.shape
-                    numel = p.grad.numel()
-                    p.grad.data = noisy_grad[offset:offset + numel].view(
-                        shape)  # + 0.1*torch.mean(pub_grad, dim=0).view(shape)
-                    offset += numel
-                optimizer.original_step()
-        else:
-            outputs = net(inputs)
-            loss = loss_func(outputs, targets)
-            loss.backward()
-            optimizer.step()
-
-            # for p in net.parameters():
-            #    p.grad.data = torch.sum(p.grad_sample, dim=0) / args.batchsize
-            #    del p.grad_sample
-            # optimizer.original_step()
-
-        step_loss = loss.item()
-        # if(args.private):
-        #    step_loss /= inputs.shape[0]
-        train_loss += step_loss
-        _, predicted = torch.max(outputs.data, 1)
-        total += targets.size(0)
-        correct += predicted.eq(targets.data).float().cpu().sum()
-        acc = 100. * float(correct) / float(total)
-    t1 = time.time()
-    print('Train loss:%.5f' % (train_loss / (batch_idx + 1)), 'time: %d s' % (t1 - t0), 'train acc:', acc, end=' ')
-    return (train_loss / batch_idx, acc)
+def check_approx_error(L, target):
+    encode = torch.matmul(target, L)  # n x k
+    decode = torch.matmul(encode, L.T)
+    error = torch.sum(torch.square(target - decode))
+    target = torch.sum(torch.square(target))
+    if (target.item() == 0):
+        return -1
+    return error.item() / target.item()
 
 
-def test(epoch):
-    global best_acc
-    net.eval()
-    test_loss = 0
-    correct = 0
-    total = 0
-    all_correct = []
-    with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(testloader):
-            if use_cuda:
-                inputs, targets = inputs.cuda(gpu_device), targets.cuda(gpu_device)
-            outputs = net(inputs)
-            loss = loss_func(outputs, targets)
-            step_loss = loss.item()
-            if (args.private):
-                step_loss /= inputs.shape[0]
+def get_bases(pub_grad, num_bases, power_iter=1):
+    num_k = pub_grad.shape[0]
+    num_p = pub_grad.shape[1]
 
-            test_loss += step_loss
-            _, predicted = torch.max(outputs.data, 1)
-            total += targets.size(0)
-            correct_idx = predicted.eq(targets.data).cpu()
-            all_correct += correct_idx.numpy().tolist()
-            correct += correct_idx.sum()
+    num_bases = min(num_bases, num_p)
+    L = torch.normal(0, 1.0, size=(pub_grad.shape[1], num_bases))
+    L = L.cuda(gpu_device)
+    for i in range(power_iter):
+        R = torch.matmul(pub_grad, L)  # n x k
+        L = torch.matmul(pub_grad.T, R)  # p x k
+        orthogonalize(L)
+    error_rate = check_approx_error(L, pub_grad)
+    print(error_rate)
+    return L, num_bases, error_rate
+ 
+public_data0 = train(0).cuda(gpu_device)
+public_data1 = train(1).cuda(gpu_device)
+private_data0 = train(2).cuda(gpu_device)
+private_data1 = train(3).cuda(gpu_device)
 
-        acc = 100. * float(correct) / float(total)
-        print('test loss:%.5f' % (test_loss / (batch_idx + 1)), 'test acc:', acc)
-        ## Save checkpoint.
-        if acc > best_acc:
-            best_acc = acc
-            checkpoint(net, acc, epoch, args.sess)
-
-    return (test_loss / batch_idx, acc)
+public_data = torch.cat((public_data0, public_data1), dim = 0)
+private_data = torch.cat((private_data0, private_data1), dim = 0)
+print(public_data.shape)
 
 
-print('\n==> Strat training')
+sample_norm = torch.norm(public_data, dim = 1)
+public_data = public_data / sample_norm.view(-1, 1)
+sample_norm = torch.norm(private_data, dim = 1)
+private_data = private_data / sample_norm.view(-1, 1)
 
-for epoch in range(start_epoch, args.n_epoch):
-    # if epoch == 0:
-    #     args.clip = [10000, 10000]
-    #     net.gep.clip = [10000, 10000]
-    train_loss, train_acc = train(epoch)
-    test_loss, test_acc = test(epoch)
 
-try:
-    os.mkdir('approx_errors')
-except:
-    pass
-import pickle
+plt.figure(figsize = (10, 10))
+plt.grid(linestyle='dashed')
+plt.tick_params(labelsize=40)
 
-bfile = open('approx_errors/' + args.sess + '.pickle', 'wb')
-pickle.dump(net.gep.approx_error, bfile)
-bfile.close()
+if False:
+    mean_col = torch.mean(torch.abs(private_data), dim = 0)
+    private_data -= mean_col
+    var_col = torch.sum(private_data ** 2, dim = 0)
+    #S, idx = torch.sort(var_col / mean_col, descending=True)
+    plt.plot((var_col / torch.abs(mean_col)).cpu())
+    plt.xlabel('Coordinate Index', fontdict = {'size': 40})
+    plt.ylabel('Coefficient of Variation', fontdict = {'size': 40})
+    #plt.ticklabel_format(axis="x", style="sci", scilimits=(0,0))
+    #ax.xaxis.get_offset_text().set_fontsize(40)
+    plt.xticks([0, 300000])
+    plt.tight_layout()
+    plt.show()
+
+if False:
+    true_grad = torch.mean(private_data, dim = 0)
+    S, idx = torch.sort(torch.abs(true_grad), descending=True)
+    norm_col = torch.norm(private_data, dim = 0) ** 2
+    norm_col = norm_col[idx]
+    for i, val in enumerate(norm_col):
+        if i >= 1:
+            norm_col[i] += norm_col[i - 1]
+    plt.plot([i * 100 / norm_col.shape[0] for i in range(norm_col.shape[0])], (1 - norm_col / 1000).cpu(), 
+        linewidth=4, linestyle='dashed')
+    plt.xlabel('Quantile Ratio %', fontdict = {'size': 40})
+    plt.ylabel('Norm of Residue', fontdict = {'size': 40})
+    plt.tight_layout()
+    plt.show()
+
+if False:
+    #L, num_bases, err = get_bases(public_data, 400, power_iter = 10)
+    #proj = torch.matmul(public_data, L)
+    #norms = torch.norm(proj, dim = 0)
+    #S, idx = torch.sort(norms, descending = True)
+    #print(norms[idx])
+
+    L, num_bases, err = get_bases(public_data, 1000, power_iter = 1)
+    proj = torch.matmul(private_data, L)
+    residual = private_data
+    norm_col = []
+
+    for i in range(1000):
+        a = proj.T[i].unsqueeze(0)
+        b = L.T[i].unsqueeze(0)
+        #print(a.shape, b.shape)
+        residual -= torch.matmul(a.T.cuda(gpu_device), b.cuda(gpu_device))
+        norm_col.append((torch.mean(torch.norm(residual, dim = 1) ** 2) ** 0.5).item())
+    plt.plot(norm_col, linewidth=4, linestyle='dashed')
+    plt.xlabel('Principle Space Dimension', fontdict = {'size': 40})
+    plt.ylabel('Norm of Residue', fontdict = {'size': 40})
+    #plt.yticks([0.2, 0.25, 0.3])
+    plt.xticks([0, 500, 1000])
+    plt.tight_layout()
+    plt.show()
+
+if True:
+    #U, S, L = torch.linalg.svd(public_data)
+    L, num_bases, err = get_bases(public_data, 1000, power_iter = 1)
+    proj = torch.matmul(private_data, L)
+    residual = private_data
+    mean = []
+    var = []
+
+    for i in range(1000):
+        a = proj.T[i].unsqueeze(0)
+        b = L.T[i].unsqueeze(0)
+        residual -= torch.matmul(a.T, b)
+        norm_2 = torch.norm(residual, dim = 1)
+        mean_norm = torch.mean(norm_2)
+        mean.append(mean_norm.item())
+        var.append((torch.mean( (norm_2 - mean_norm) ** 2 ) ** 0.5).item())
+    print(var)
+    #plt.scatter(range(len(mean)), mean, label = 'mean', linewidth=5)
+    plt.plot(mean, linewidth=4, label = 'mean', linestyle='dashed')
+    plt.plot(var, linewidth=4, label = 'std', linestyle='dashed')
+    plt.legend(fontsize="40")
+    plt.yticks([0, 0.08,  0.2, 0.5, 1])
+    plt.xticks([0, 500, 1000])
+    plt.xlabel('Principle space Dimension', fontdict = {'size': 40})
+    plt.tight_layout()
+    plt.show()
+
+
+if False:
+    l_inf, idx = torch.max(private_data, dim = 1)
+    l_inf, idx = torch.sort(l_inf, descending=True)
+    plt.plot(l_inf.cpu(), linewidth=4, linestyle='dashed')
+    plt.xlabel('Sorted Sample Index', fontdict = {'size': 40})
+    plt.ylabel('Infinity Norm of Samples', fontdict = {'size': 40})
+    plt.xticks([0, 500, 1000])
+    plt.tight_layout()
+    plt.show()
+ 
+ 
+
 
